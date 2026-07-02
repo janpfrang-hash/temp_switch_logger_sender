@@ -1,0 +1,92 @@
+name: Manual Firmware Build
+
+# Builds the LoraDoorSensor sketch manually via workflow_dispatch.
+
+on:
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same branch
+concurrency:
+  group: manual-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SKETCH_DIR: LoraDoorSensor
+  FQBN_BASE: esp32:esp32:esp32s3
+  # ESP32-S3R2: 16 MB flash, 2 MB PSRAM, native USB CDC for Serial-over-USB
+  FQBN_OPTIONS: CDCOnBoot=cdc,PSRAM=enabled,FlashSize=16M,PartitionScheme=default_16MB
+  # Pin the ESP32 Arduino core version so builds are reproducible.
+  ESP32_CORE_VERSION: "3.1.1"
+  ARDUINO_CLI_VERSION: "1.1.1"
+
+jobs:
+  build:
+    name: Build (${{ matrix.role.name }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - name: node
+            define: ROLE_NODE
+          - name: gateway
+            define: ROLE_GATEWAY
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: ${{ env.ARDUINO_CLI_VERSION }}
+
+      - name: Cache arduino-cli data (cores + libraries)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ env.ESP32_CORE_VERSION }}-${{ hashFiles('.github/workflows/*.yml') }}
+
+      - name: Configure arduino-cli
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      - name: Install ESP32 core (pinned version)
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@${{ env.ESP32_CORE_VERSION }}
+
+      - name: Install required libraries (pinned versions)
+        run: |
+          arduino-cli lib install \
+            "RadioLib@6.6.0" \
+            "Adafruit BMP280 Library@2.6.8" \
+            "Adafruit Unified Sensor@1.1.14" \
+            "OneWire@2.3.8" \
+            "DallasTemperature@3.11.0" \
+            "ESP8266 and ESP32 OLED driver for SSD1306 displays@4.6.1"
+
+      - name: Compile (${{ matrix.role.name }})
+        run: |
+          mkdir -p build/${{ matrix.role.name }}
+          arduino-cli compile \
+            --fqbn "${{ env.FQBN_BASE }}:${{ env.FQBN_OPTIONS }}" \
+            --build-property "build.extra_flags=-D${{ matrix.role.define }}" \
+            --export-binaries \
+            --output-dir build/${{ matrix.role.name }} \
+            --warnings default \
+            "${{ env.SKETCH_DIR }}"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.role.name }}-manual
+          path: |
+            build/${{ matrix.role.name }}/*.bin
+            build/${{ matrix.role.name }}/*.elf
+          if-no-files-found: error
+          retention-days: 30
